@@ -2,16 +2,25 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
+from datetime import datetime
 
-# 1. 페이지 설정 및 서비스 명칭 적용
+# 1. 페이지 기본 설정
 st.set_page_config(page_title="StockCompass AI", layout="wide", page_icon="🧭")
 
-# 서비스 헤더
+# 스타일 개선 (CSS)
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# 2. 서비스 헤더
 st.title("🧭 StockCompass AI")
 st.markdown("#### 데이터로 정밀 진단하는 당신의 투자 나침반")
 st.caption("성장성(PER) + 안정성(배당) + 시장 심리(뉴스)를 종합 분석하여 고점 여부를 판단합니다.")
 
-# 2. 섹터 데이터베이스
+# 3. 섹터 데이터베이스
 SECTORS = {
     "미국 M7 (빅테크)": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA"],
     "글로벌 반도체": ["NVDA", "AMD", "ASML", "TSM", "INTC", "MU", "AVGO"],
@@ -22,101 +31,133 @@ SECTORS = {
     "바이오 & 헬스케어": ["LLY", "NVO", "207940.KS", "068270.KS", "PFE", "JNJ"]
 }
 
-# 3. 뉴스 감성 분석 로직
+# 4. 핵심 기능 함수들
 def analyze_sentiment(news_list):
-    pos_words = ['buy', 'growth', 'positive', 'up', 'increase', 'bull', 'strong', 'profit', 'beat']
+    """뉴스 헤드라인 감성 분석"""
+    if not news_list: return "😐 데이터 없음"
+    pos_words = ['buy', 'growth', 'positive', 'up', 'increase', 'bull', 'strong', 'profit', 'beat', 'ahead']
     neg_words = ['sell', 'decline', 'negative', 'down', 'decrease', 'bear', 'weak', 'loss', 'risk', 'miss']
-    
     score = 0
     for news in news_list:
-        title = news['title'].lower()
+        title = news.get('title', '').lower()
         score += sum(1 for pw in pos_words if pw in title)
         score -= sum(1 for nw in neg_words if nw in title)
-    
     if score > 0: return "📈 긍정 (Bullish)"
     elif score < 0: return "📉 부정 (Bearish)"
     else: return "😐 중립 (Neutral)"
 
-# 4. 종합 데이터 수집 함수
+def get_safe_stock_data(ticker_symbol):
+    """실패 없는 데이터 수집을 위한 안전 장치 로직"""
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        # .info 가 실패할 경우를 대비해 기본 데이터 우선 추출
+        info = stock.info
+        
+        # 최소한 현재가 정보는 있어야 분석 가능
+        current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+        if not current_price:
+            return None
+
+        return {
+            "티커": ticker_symbol,
+            "기업명": info.get('shortName', ticker_symbol),
+            "현재가": current_price,
+            "PER": info.get('trailingPE', 0) or info.get('forwardPE', 0) or 0,
+            "매출성장률(%)": (info.get('revenueGrowth', 0) or 0) * 100,
+            "배당수익률(%)": (info.get('dividendYield', 0) or 0) * 100,
+            "영업이익률(%)": (info.get('operatingMargins', 0) or 0) * 100,
+            "시총(B)": round(info.get('marketCap', 0) / 1e9, 2) if info.get('marketCap') else 0,
+            "뉴스": stock.news[:5] if hasattr(stock, 'news') else []
+        }
+    except Exception:
+        return None
+
 @st.cache_data(ttl=3600)
-def fetch_all_data(tickers):
+def fetch_all_sector_data(tickers):
     results = []
+    failed = []
     for t in tickers:
-        try:
-            stock = yf.Ticker(t)
-            info = stock.info
-            news = stock.news[:5]
-            
-            results.append({
-                "티커": t,
-                "기업명": info.get('shortName', t),
-                "현재가": info.get('currentPrice'),
-                "PER": info.get('trailingPE', 0),
-                "매출성장률(%)": info.get('revenueGrowth', 0) * 100,
-                "배당수익률(%)": (info.get('dividendYield', 0) * 100) if info.get('dividendYield') else 0,
-                "영업이익률(%)": (info.get('operatingMargins', 0) * 100) if info.get('operatingMargins') else 0,
-                "뉴스감성": analyze_sentiment(news),
-                "시총(B)": round(info.get('marketCap', 0) / 1e9, 2)
-            })
-        except: continue
-    return pd.DataFrame(results)
+        t = t.strip()
+        data = get_safe_stock_data(t)
+        if data:
+            data['뉴스감성'] = analyze_sentiment(data['뉴스'])
+            results.append(data)
+        else:
+            failed.append(t)
+    return pd.DataFrame(results), failed
 
-# 5. 사이드바 컨트롤
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1491/1491258.png", width=100)
-st.sidebar.header("설정 패널")
-selected_name = st.sidebar.selectbox("🎯 분석 섹터 선택", list(SECTORS.keys()))
-custom_tickers = st.sidebar.text_area("📝 종목 편집", value=", ".join(SECTORS[selected_name]))
+# 5. 사이드바 UI
+st.sidebar.header("🎯 분석 설정")
+selected_name = st.sidebar.selectbox("섹터 선택", list(SECTORS.keys()))
+ticker_input = st.sidebar.text_area("종목 편집 (쉼표 구분)", value=", ".join(SECTORS[selected_name]))
 
-# 6. 실행 및 결과 출력
+# 6. 메인 실행 로직
 if st.sidebar.button("🔍 나침반 가동"):
-    df = fetch_all_data([x.strip() for x in custom_tickers.split(",")])
+    ticker_list = [x.strip() for x in ticker_input.split(",") if x.strip()]
+    
+    with st.spinner('실시간 시장 데이터를 분석 중입니다...'):
+        df, failed_list = fetch_all_sector_data(ticker_list)
+
+    if failed_list:
+        st.warning(f"⚠️ 일부 데이터를 가져오지 못했습니다: {', '.join(failed_list)}")
+        st.caption("팁: 한국 주식은 종목코드 뒤에 .KS(코스피) 또는 .KQ(코스닥)를 붙여주세요.")
 
     if not df.empty:
+        # 요약 메트릭
         avg_per = df[df['PER'] > 0]['PER'].mean()
+        avg_div = df['배당수익률(%)'].mean()
         
-        # 상단 요약 요약
-        st.subheader(f"📍 {selected_name} 섹터 정밀 진단")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("섹터 평균 PER", f"{avg_per:.1f}배")
-        m2.metric("최고 배당주", df.loc[df['배당수익률(%)'].idxmax(), '티커'])
-        m3.metric("최고 성장주", df.loc[df['매출성장률(%)'].idxmax(), '티커'])
+        st.subheader(f"📍 {selected_name} 섹터 정밀 리포트")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("섹터 평균 PER", f"{avg_per:.1f}배")
+        col2.metric("평균 배당수익률", f"{avg_div:.2f}%")
+        col3.metric("분석 종목 수", f"{len(df)}개")
 
-        # 메인 시각화: PER vs 배당수익률 (안전성 맵)
+        # 시각화: PER vs 배당수익률 (뉴스 감성 포함)
         st.divider()
         st.write("### 🧭 가치 & 안전성 매트릭스")
+        
+        
+        
         fig = px.scatter(df, x="PER", y="배당수익률(%)", size="시총(B)",
                          text="티커", color="뉴스감성",
-                         color_discrete_map={"📈 긍정 (Bullish)": "#2ecc71", "📉 부정 (Bearish)": "#e74c3c", "😐 중립 (Neutral)": "#95a5a6"},
-                         template="plotly_dark")
+                         color_discrete_map={
+                             "📈 긍정 (Bullish)": "#2ecc71", 
+                             "📉 부정 (Bearish)": "#e74c3c", 
+                             "😐 중립 (Neutral)": "#95a5a6",
+                             "😐 데이터 없음": "#34495e"
+                         },
+                         template="plotly_dark",
+                         hover_name="기업명")
         
-        fig.add_vline(x=avg_per, line_dash="dash", line_color="white", annotation_text="평균 PER")
+        fig.add_vline(x=avg_per, line_dash="dash", line_color="orange", annotation_text="평균 PER")
         st.plotly_chart(fig, use_container_width=True)
-        
-        
 
-        # 데이터 테이블 및 AI 진단
-        st.subheader("📋 상세 분석 데이터")
-        st.dataframe(df.style.background_gradient(subset=['배당수익률(%)'], cmap='Greens')
+        # 상세 데이터 테이블
+        st.subheader("📋 상세 분석 시트")
+        st.dataframe(df.drop(columns=['뉴스']).style.background_gradient(subset=['배당수익률(%)'], cmap='Greens')
                          .background_gradient(subset=['매출성장률(%)'], cmap='Blues'))
 
+        # 종목별 AI 진단
         st.divider()
-        st.subheader("💡 StockCompass AI의 최종 제언")
+        st.subheader("💡 StockCompass AI 최종 진단")
         
         for _, row in df.iterrows():
-            with st.expander(f"🔍 {row['이름']} ({row['티커']}) 심층 진단"):
+            with st.expander(f"🔍 {row['기업명']} ({row['티커']}) 심층 분석"):
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.write(f"**심리 상태:** {row['뉴스감성']}")
-                    st.write(f"**밸류에이션:** {'상대적 고평가' if row['PER'] > avg_per else '상대적 저평가'}")
+                    st.write(f"**현재가:** {row['현재가']:,}")
+                    st.write(f"**PER:** {row['PER']:.2f} (평균 대비 {'높음' if row['PER'] > avg_per else '낮음'})")
+                    st.write(f"**뉴스 감성:** {row['뉴스감성']}")
                 with c2:
-                    # 예측 로직
+                    # 복합 진단 로직
                     if "긍정" in row['뉴스감성'] and row['PER'] < avg_per:
-                        st.success("✅ **[매수 적기]** 뉴스 흐름이 좋고 업계 평균보다 저렴합니다.")
-                    elif "부정" in row['뉴스감성'] and row['PER'] > avg_per:
-                        st.error("🚨 **[고점 주의]** 뉴스는 부정적인데 주가는 거품이 끼어 있습니다.")
-                    elif row['배당수익률(%)'] > 4:
-                        st.info("💎 **[배당 매력]** 주가 변동과 관계없이 배당 수익이 탄탄한 구간입니다.")
+                        st.success("✨ **[강력 추천]** 호재가 있고 밸류에이션이 낮습니다. 매수 기회입니다.")
+                    elif row['PER'] > avg_per * 1.5 and "부정" in row['뉴스감성']:
+                        st.error("🚨 **[고점 경고]** 주가는 비싼데 뉴스는 부정적입니다. 단기 고점일 확률이 높습니다.")
+                    elif row['배당수익률(%)'] > 3.5:
+                        st.info("💎 **[안전 자산]** 배당 수익률이 높아 하락장에서 방어력이 좋습니다.")
                     else:
-                        st.warning("⚠️ **[관망 추천]** 뚜렷한 방향성이 보이지 않는 중립 구간입니다.")
+                        st.warning("😐 **[관망]** 뚜렷한 매수/매도 신호가 없는 중립 구간입니다.")
     else:
-        st.error("데이터를 불러오지 못했습니다.")
+        st.error("데이터 로딩에 실패했습니다. 모든 티커가 유효한지 확인해주세요.")
